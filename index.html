@@ -212,32 +212,6 @@
             return colors[blockType] || 0xff0000;
         }
 
-        function convertAndRender() {
-            const nbtInput = document.getElementById('nbtInput').value.trim();
-            const errorDiv = document.getElementById('error');
-            const successDiv = document.getElementById('success');
-            
-            errorDiv.textContent = '';
-            successDiv.textContent = '';
-            
-            try {
-                const nbtData = JSON.parse(nbtInput);
-                const patchouli = nbtToPatchouli(nbtData);
-                currentPatchouli = patchouli;
-                
-                // Display output
-                document.getElementById('patchouliOutput').textContent = JSON.stringify(patchouli, null, 2);
-                document.getElementById('copyBtn').style.display = 'inline-block';
-                
-                renderStructure(patchouli);
-                
-                successDiv.textContent = 'Conversion successful!';
-                
-            } catch (error) {
-                errorDiv.textContent = 'Error: ' + error.message;
-            }
-        }
-
         function renderStructure(patchouli) {
             // Clear previous render
             blockMeshes.forEach(mesh => scene.remove(mesh));
@@ -339,44 +313,7 @@
             }
         }
 
-        async function loadFile() {
-            const fileInput = document.getElementById('fileInput');
-            const file = fileInput.files[0];
-            
-            if (!file) {
-                document.getElementById('error').textContent = 'Please select a file first';
-                return;
-            }
-            
-            const reader = new FileReader();
-            
-            if (file.name.endsWith('.json')) {
-                reader.onload = function(e) {
-                    document.getElementById('nbtInput').value = e.target.result;
-                };
-                reader.readAsText(file);
-            } else if (file.name.endsWith('.nbt')) {
-                reader.onload = async function(e) {
-                    try {
-                        // Parse binary NBT file
-                        const arrayBuffer = e.target.result;
-                        const uint8Array = new Uint8Array(arrayBuffer);
-                        const parsed = await NBTify.read(uint8Array);
-                        
-                        // Convert to JSON and display
-                        const jsonStr = JSON.stringify(parsed, null, 2);
-                        document.getElementById('nbtInput').value = jsonStr;
-                        document.getElementById('success').textContent = 'NBT file loaded successfully!';
-                        
-                    } catch (error) {
-                        document.getElementById('error').textContent = 'Error parsing NBT file: ' + error.message;
-                    }
-                };
-                reader.readAsArrayBuffer(file);
-            } else {
-                document.getElementById('error').textContent = 'Please select a .nbt or .json file';
-            }
-        }
+        function loadExample() {
             const example = {
                 "size": [2, 2, 2],
                 "palette": [
