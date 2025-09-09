@@ -68,7 +68,7 @@
         </div>
     </div>
 
-    <!-- Load NBT.js before your own script -->
+    <!-- Make sure this is loaded BEFORE your main JS below! -->
     <script src="https://unpkg.com/nbt@2.0.0/dist/nbt.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
@@ -323,6 +323,7 @@
                                 return;
                             }
                             let nbtData = null;
+                            // Support Minecraft 1.13+ structure block format
                             if (data.value.size && data.value.palette && data.value.blocks) {
                                 nbtData = {
                                     size: data.value.size.value.value,
@@ -337,7 +338,7 @@
                                 document.getElementById('nbtInput').value = JSON.stringify(nbtData, null, 2);
                                 successDiv.textContent = 'NBT file loaded successfully!';
                             } else {
-                                errorDiv.textContent = 'Unsupported NBT structure.';
+                                errorDiv.textContent = 'Unsupported NBT structure. Only Minecraft 1.13+ structure block files are supported.';
                             }
                         });
                     } catch (error) {
