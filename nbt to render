@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>NBT to Patchouli Converter</title>
+    <style>
+        body { margin: 0; background: #1a1a1a; color: white; font-family: Arial, sans-serif; }
+        .container { padding: 20px; max-width: 1200px; margin: 0 auto; }
+        .section { background: #2a2a2a; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        textarea { width: 100%; height: 150px; background: #1a1a1a; color: white; border: 1px solid #555; padding: 10px; border-radius: 4px; font-family: monospace; }
+        button { background: #4a9eff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin: 10px 5px 10px 0; }
+        button:hover { background: #3a8eef; }
+        #canvas { border: 1px solid #555; }
+        .error { color: #ff6b6b; margin-top: 10px; }
+        .success { color: #51cf66; margin-top: 10px; }
+        .output { background: #1a1a1a; border: 1px solid #555; padding: 10px; border-radius: 4px; font-family: monospace; white-space: pre-wrap; margin-top: 10px; max-height: 200px; overflow-y: auto; }
+        .controls { margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>NBT to Patchouli Converter</h1>
+        
+        <div class="section">
+            <h3>NBT Input</h3>
+            <textarea id="nbtInput" placeholder='Paste NBT data here:
+{
+  "size": [2, 2, 2],
+  "palette": [
+    {"Name": "minecraft:stone"},
+    {"Name": "minecraft:oak_planks"},
+    {"Name": "minecraft:glass"},
+    {"Name": "minecraft:iron_block"}
+  ],
+  "blocks": [
+    {"pos": [0, 0, 0], "state": 0},
+    {"pos": [1, 0, 0], "state": 1},
+    {"pos": [0, 0, 1], "state": 2},
+    {"pos": [1, 0, 1], "state": 3},
+    {"pos": [0, 1, 0], "state": 0},
+    {"pos": [1, 1, 0], "state": 0},
+    {"pos": [0, 1, 1], "state": 0},
+    {"pos": [1, 1, 1], "state": 0}
+  ]
+}'></textarea>
+            <button onclick="convertAndRender()">Convert & Render</button>
+            <button onclick="loadExample()">Load Example</button>
+            <div id="error" class="error"></div>
+            <div id="success" class="success"></div>
+        </div>
+
+        <div class="section">
+            <h3>Patchouli Output</h3>
+            <div id="patchouliOutput" class="output"></div>
+            <button onclick="copyToClipboard()" style="display: none;" id="copyBtn">Copy to Clipboard</button>
+        </div>
+        
+        <div class="section">
+            <h3>3D Preview</h3>
+            <div class="controls">
+                <label>Layer: <select id="layerSelect" onchange="updateView()"></select></label>
+                <button onclick="showAllLayers()">Show All</button>
+                <button onclick="resetCamera()">Reset Camera</button>
+            </div>
+            <canvas id="canvas" width="800" height="600"></canvas>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        let scene, camera, renderer;
+        let blockMeshes = [];
+        let currentPatchouli = null;
+        let controls = { isDragging: false, previousMouse: { x: 0, y: 0 } };
+
+        function nbtToPatchouli(nbtData) {
+            const size = nbtData.size || [0, 0, 0];
+            const palette = nbtData.palette || [];
+            const blocks = nbtData.blocks || [];
+            
+            const [width, height, depth] = size;
+            
+            // Create character mapping
+            const mapping = {};
+            const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            
+            palette.forEach((blockEntry, i) => {
+                const blockName = blockEntry.Name || 'minecraft:air';
+                if (i < chars.length) {
+                    mapping[chars[i]] = blockName;
+                }
+            });
+            
+            // Initialize pattern with air
+            const pattern = [];
+            for (let y = 0; y < height; y++) {
+                const layer = [];
+                for (let z = 0; z < depth; z++) {
+                    layer.push(" ".repeat(width));
+                }
+                pattern.push(layer);
+            }
+            
+            // Place blocks
+            blocks.forEach(block => {
+                const pos = block.pos || [0, 0, 0];
+                const state = block.state || 0;
+                const [x, y, z] = pos;
+                
+                if (state < chars.length && y < pattern.length && z < pattern[y].length && x < pattern[y][z].length) {
+                    const char = chars[state];
+                    const layer = pattern[y];
+                    const row = layer[z];
+                    layer[z] = row.substring(0, x) + char + row.substring(x + 1);
+                }
+            });
+            
+            // Mark center with '0'
+            const centerX = Math.floor(width / 2);
+            const centerY = height - 1;
+            const centerZ = Math.floor(depth / 2);
+            
+            if (centerY >= 0 && centerY < pattern.length && 
+                centerZ >= 0 && centerZ < pattern[centerY].length) {
+                const layer = pattern[centerY];
+                const row = layer[centerZ];
+                if (centerX >= 0 && centerX < row.length) {
+                    layer[centerZ] = row.substring(0, centerX) + '0' + row.substring(centerX + 1);
+                }
+            }
+            
+            return {
+                pattern: pattern,
+                mapping: mapping,
+                symmetrical: false
+            };
+        }
+
+        function init3D() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x333333);
+            
+            camera = new THREE.PerspectiveCamera(75, 800/600, 0.1, 1000);
+            camera.position.set(5, 5, 5);
+            camera.lookAt(0, 0, 0);
+            
+            renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('canvas') });
+            renderer.setSize(800, 600);
+            
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(10, 10, 5);
+            scene.add(directionalLight);
+            
+            addMouseControls();
+            animate();
+        }
+
+        function addMouseControls() {
+            const canvas = document.getElementById('canvas');
+            
+            canvas.addEventListener('mousedown', (e) => {
+                controls.isDragging = true;
+                controls.previousMouse = { x: e.clientX, y: e.clientY };
+            });
+            
+            document.addEventListener('mousemove', (e) => {
+                if (controls.isDragging) {
+                    const deltaX = e.clientX - controls.previousMouse.x;
+                    const deltaY = e.clientY - controls.previousMouse.y;
+                    
+                    const spherical = new THREE.Spherical();
+                    spherical.setFromVector3(camera.position);
+                    
+                    spherical.theta -= deltaX * 0.01;
+                    spherical.phi += deltaY * 0.01;
+                    spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi));
+                    
+                    camera.position.setFromSpherical(spherical);
+                    camera.lookAt(0, 0, 0);
+                    
+                    controls.previousMouse = { x: e.clientX, y: e.clientY };
+                }
+            });
+            
+            document.addEventListener('mouseup', () => {
+                controls.isDragging = false;
+            });
+            
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const scale = e.deltaY > 0 ? 1.1 : 0.9;
+                camera.position.multiplyScalar(scale);
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+
+        function getBlockColor(blockType) {
+            const colors = {
+                'minecraft:stone': 0x7a7a7a,
+                'minecraft:oak_planks': 0xb5935b,
+                'minecraft:glass': 0xe6f3ff,
+                'minecraft:iron_block': 0xd8d8d8,
+                'minecraft:cobblestone': 0x6b6b6b,
+                'minecraft:dirt': 0x8b6914,
+                'minecraft:grass_block': 0x7bb146
+            };
+            return colors[blockType] || 0xff0000;
+        }
+
+        function convertAndRender() {
+            const nbtInput = document.getElementById('nbtInput').value.trim();
+            const errorDiv = document.getElementById('error');
+            const successDiv = document.getElementById('success');
+            
+            errorDiv.textContent = '';
+            successDiv.textContent = '';
+            
+            try {
+                const nbtData = JSON.parse(nbtInput);
+                const patchouli = nbtToPatchouli(nbtData);
+                currentPatchouli = patchouli;
+                
+                // Display output
+                document.getElementById('patchouliOutput').textContent = JSON.stringify(patchouli, null, 2);
+                document.getElementById('copyBtn').style.display = 'inline-block';
+                
+                renderStructure(patchouli);
+                
+                successDiv.textContent = 'Conversion successful!';
+                
+            } catch (error) {
+                errorDiv.textContent = 'Error: ' + error.message;
+            }
+        }
+
+        function renderStructure(patchouli) {
+            // Clear previous render
+            blockMeshes.forEach(mesh => scene.remove(mesh));
+            blockMeshes = [];
+            
+            const pattern = patchouli.pattern;
+            const mapping = patchouli.mapping;
+            
+            for (let y = 0; y < pattern.length; y++) {
+                const layer = pattern[y];
+                for (let z = 0; z < layer.length; z++) {
+                    const row = layer[z];
+                    for (let x = 0; x < row.length; x++) {
+                        const char = row[x];
+                        
+                        if (char === ' ' || char === '0') continue;
+                        
+                        const blockType = mapping[char];
+                        if (!blockType) continue;
+                        
+                        const geometry = new THREE.BoxGeometry(0.9, 0.9, 0.9);
+                        const material = new THREE.MeshLambertMaterial({
+                            color: getBlockColor(blockType),
+                            transparent: blockType.includes('glass'),
+                            opacity: blockType.includes('glass') ? 0.7 : 1
+                        });
+                        
+                        const mesh = new THREE.Mesh(geometry, material);
+                        mesh.position.set(x - 1, -(y - 1), z - 1);
+                        mesh.userData = { blockType, layer: y, position: [x, y, z] };
+                        
+                        scene.add(mesh);
+                        blockMeshes.push(mesh);
+                    }
+                }
+            }
+            
+            // Update layer selector
+            updateLayerSelector(pattern.length);
+        }
+
+        function updateLayerSelector(layerCount) {
+            const select = document.getElementById('layerSelect');
+            select.innerHTML = '<option value="all">All Layers</option>';
+            
+            for (let i = 0; i < layerCount; i++) {
+                const option = document.createElement('option');
+                option.value = i;
+                option.textContent = `Layer ${i}`;
+                select.appendChild(option);
+            }
+        }
+
+        function updateView() {
+            const selectedLayer = document.getElementById('layerSelect').value;
+            
+            blockMeshes.forEach(mesh => {
+                if (selectedLayer === 'all') {
+                    mesh.visible = true;
+                } else {
+                    mesh.visible = mesh.userData.layer === parseInt(selectedLayer);
+                }
+            });
+        }
+
+        function showAllLayers() {
+            document.getElementById('layerSelect').value = 'all';
+            updateView();
+        }
+
+        function resetCamera() {
+            camera.position.set(5, 5, 5);
+            camera.lookAt(0, 0, 0);
+        }
+
+        function convertAndRender() {
+            const nbtInput = document.getElementById('nbtInput').value.trim();
+            const errorDiv = document.getElementById('error');
+            const successDiv = document.getElementById('success');
+            
+            errorDiv.textContent = '';
+            successDiv.textContent = '';
+            
+            try {
+                const nbtData = JSON.parse(nbtInput);
+                const patchouli = nbtToPatchouli(nbtData);
+                currentPatchouli = patchouli;
+                
+                // Display output
+                document.getElementById('patchouliOutput').textContent = JSON.stringify(patchouli, null, 2);
+                document.getElementById('copyBtn').style.display = 'inline-block';
+                
+                renderStructure(patchouli);
+                
+                successDiv.textContent = 'Conversion successful!';
+                
+            } catch (error) {
+                errorDiv.textContent = 'Error: ' + error.message;
+            }
+        }
+
+        function loadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                document.getElementById('error').textContent = 'Please select a file first';
+                return;
+            }
+            
+            const reader = new FileReader();
+            
+            if (file.name.endsWith('.json')) {
+                reader.onload = function(e) {
+                    document.getElementById('nbtInput').value = e.target.result;
+                };
+                reader.readAsText(file);
+            } else if (file.name.endsWith('.nbt')) {
+                reader.onload = function(e) {
+                    // For .nbt files, we'd need an NBT parser library
+                    document.getElementById('error').textContent = 'Binary NBT files not supported yet. Export as JSON instead.';
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        }
+            const example = {
+                "size": [2, 2, 2],
+                "palette": [
+                    {"Name": "minecraft:stone"},
+                    {"Name": "minecraft:oak_planks"},
+                    {"Name": "minecraft:glass"},
+                    {"Name": "minecraft:iron_block"}
+                ],
+                "blocks": [
+                    {"pos": [0, 0, 0], "state": 0},
+                    {"pos": [1, 0, 0], "state": 1},
+                    {"pos": [0, 0, 1], "state": 2},
+                    {"pos": [1, 0, 1], "state": 3},
+                    {"pos": [0, 1, 0], "state": 0},
+                    {"pos": [1, 1, 0], "state": 0},
+                    {"pos": [0, 1, 1], "state": 0},
+                    {"pos": [1, 1, 1], "state": 0}
+                ]
+            };
+            document.getElementById('nbtInput').value = JSON.stringify(example, null, 2);
+        
+
+        async function copyToClipboard() {
+            const output = document.getElementById('patchouliOutput').textContent;
+            try {
+                await navigator.clipboard.writeText(output);
+                document.getElementById('success').textContent = 'Copied to clipboard!';
+            } catch (err) {
+                document.getElementById('error').textContent = 'Failed to copy to clipboard';
+            }
+        }
+
+        window.onload = function() {
+            init3D();
+            loadExample();
+        };
+    </script>
+</body>
+</html>
