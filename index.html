@@ -339,7 +339,7 @@
             }
         }
 
-        function loadFile() {
+        async function loadFile() {
             const fileInput = document.getElementById('fileInput');
             const file = fileInput.files[0];
             
@@ -356,11 +356,25 @@
                 };
                 reader.readAsText(file);
             } else if (file.name.endsWith('.nbt')) {
-                reader.onload = function(e) {
-                    // For .nbt files, we'd need an NBT parser library
-                    document.getElementById('error').textContent = 'Binary NBT files not supported yet. Export as JSON instead.';
+                reader.onload = async function(e) {
+                    try {
+                        // Parse binary NBT file
+                        const arrayBuffer = e.target.result;
+                        const uint8Array = new Uint8Array(arrayBuffer);
+                        const parsed = await NBTify.read(uint8Array);
+                        
+                        // Convert to JSON and display
+                        const jsonStr = JSON.stringify(parsed, null, 2);
+                        document.getElementById('nbtInput').value = jsonStr;
+                        document.getElementById('success').textContent = 'NBT file loaded successfully!';
+                        
+                    } catch (error) {
+                        document.getElementById('error').textContent = 'Error parsing NBT file: ' + error.message;
+                    }
                 };
                 reader.readAsArrayBuffer(file);
+            } else {
+                document.getElementById('error').textContent = 'Please select a .nbt or .json file';
             }
         }
             const example = {
@@ -383,7 +397,7 @@
                 ]
             };
             document.getElementById('nbtInput').value = JSON.stringify(example, null, 2);
-        
+        }
 
         async function copyToClipboard() {
             const output = document.getElementById('patchouliOutput').textContent;
