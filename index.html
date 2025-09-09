@@ -42,6 +42,9 @@
     {"pos": [1, 1, 1], "state": 0}
   ]
 }'></textarea>
+            <br>
+            <input type="file" id="fileInput" accept=".json,.nbt" />
+            <button onclick="loadFile()">Upload File</button>
             <button onclick="convertAndRender()">Convert & Render</button>
             <button onclick="loadExample()">Load Example</button>
             <div id="error" class="error"></div>
@@ -334,6 +337,39 @@
                 ]
             };
             document.getElementById('nbtInput').value = JSON.stringify(example, null, 2);
+        }
+
+        async function loadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                document.getElementById('error').textContent = 'Please select a file first';
+                return;
+            }
+            
+            const reader = new FileReader();
+            
+            if (file.name.endsWith('.json')) {
+                reader.onload = function(e) {
+                    document.getElementById('nbtInput').value = e.target.result;
+                };
+                reader.readAsText(file);
+            } else if (file.name.endsWith('.nbt')) {
+                reader.onload = async function(e) {
+                    try {
+                        // NOTE: This requires NBTify.read or similar library.
+                        // If you want to support .nbt, you must include an NBT parser library.
+                        // Example: https://github.com/tryashtar/nbt-js
+                        document.getElementById('error').textContent = 'NBT parsing not implemented. Please use JSON files, or add an NBT parser library.';
+                    } catch (error) {
+                        document.getElementById('error').textContent = 'Error parsing NBT file: ' + error.message;
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            } else {
+                document.getElementById('error').textContent = 'Please select a .nbt or .json file';
+            }
         }
 
         async function copyToClipboard() {
