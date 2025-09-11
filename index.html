@@ -107,19 +107,289 @@
                     layer[z] = row.substring(0, x) + char + row.substring(x + 1);
                 }
             });
-            // Mark center with '0'
+            // Mark center with '0' — do NOT overwrite existing blocks
             const centerX = Math.floor(width / 2);
-            const centerY = height - 1;
+            // place marker in vertical middle instead of top (safer)
+            const centerY = Math.floor(height / 2);
             const centerZ = Math.floor(depth / 2);
-            if (centerY >= 0 && centerY < pattern.length && 
+
+            if (centerY >= 0 && centerY < pattern.length &&
                 centerZ >= 0 && centerZ < pattern[centerY].length) {
                 const layer = pattern[centerY];
                 const row = layer[centerZ];
                 if (centerX >= 0 && centerX < row.length) {
-                    layer[centerZ] = row.substring(0, centerX) + '0' + row.substring(centerX + 1);
+                    // Only insert marker if the cell is empty (space)
+                    if (row[centerX] === ' ') {
+                        layer[centerZ] = row.substring(0, centerX) + '0' + row.substring(centerX + 1);
+                    }
                 }
             }
             return { pattern, mapping, symmetrical: false };
+        }
+
+        // Minimal NBT parser (supports the types used in structure block .nbt files)
+        function parseNBTBuffer(arrayBuffer) {
+            const dv = new DataView(arrayBuffer);
+            let offset = 0;
+            const textDecoder = new TextDecoder();
+
+            function readUint8() { return dv.getUint8(offset++); }
+            function readInt8() { return dv.getInt8(offset++); }
+            function readInt16() { const v = dv.getInt16(offset, false); offset += 2; return v; }
+            function readUint16() { const v = dv.getUint16(offset, false); offset += 2; return v; }
+            function readInt32() { const v = dv.getInt32(offset, false); offset += 4; return v; }
+            function readFloat32() { const v = dv.getFloat32(offset, false); offset += 4; return v; }
+            function readFloat64() { const v = dv.getFloat64(offset, false); offset += 8; return v; }
+            function readBytes(len) { const bytes = new Uint8Array(arrayBuffer, offset, len); offset += len; return bytes; }
+            function readString() {
+                const len = readUint16();
+                const bytes = readBytes(len);
+                return textDecoder.decode(bytes);
+            }
+
+            function parsePayload(tagType) {
+                switch (tagType) {
+                    case 1: return readInt8(); // Byte
+                    case 2: return readInt16(); // Short
+                    case 3: return readInt32(); // Int
+                    case 4: {
+                        // Long - read two int32s, combine to BigInt if supported
+                        const hi = readInt32();
+                        const lo = readInt32();
+                        try {
+                            return BigInt(hi) << 32n | BigInt(lo >>> 0);
+                        } catch (e) {
+                            // fallback to Number (may lose precision)
+                            return hi * 0x100000000 + (lo >>> 0);
+                        }
+                    }
+                    case 5: return readFloat32();
+                    case 6: return readFloat64();
+                    case 7: {
+                        const length = readInt32();
+                        const arr = [];
+                        for (let i = 0; i < length; i++) arr.push(readInt8());
+                        return arr;
+                    }
+                    case 8: return readString();
+                    case 9: {
+                        const elemType = readUint8();
+                        const length = readInt32();
+                        const list = [];
+                        for (let i = 0; i < length; i++) {
+                            list.push(parsePayload(elemType));
+                        }
+                        return list;
+                    }
+                    case 10: {
+                        const obj = {};
+                        while (true) {
+                            const t = readUint8();
+                            if (t === 0) break;
+                            const name = readString();
+                            obj[name] = parsePayload(t);
+                        }
+                        return obj;
+                    }
+                    case 11: {
+                        const length = readInt32();
+                        const arr = [];
+                        for (let i = 0; i < length; i++) arr.push(readInt32());
+                        return arr;
+                    }
+                    case 12: {
+                        const length = readInt32();
+                        const arr = [];
+                        for (let i = 0; i < length; i++) {
+                            const hi = readInt32();
+                            const lo = readInt32();
+                            try { arr.push((BigInt(hi) << 32n) | BigInt(lo >>> 0)); }
+                            catch (e) { arr.push(hi * 0x100000000 + (lo >>> 0)); }
+                        }
+                        return arr;
+                    }
+                    default:
+                        throw new Error('Unsupported NBT tag type: ' + tagType);
+                }
+            }
+
+            // read root tag
+            const rootTag = readUint8();
+            if (rootTag === 0) return {};
+            const rootName = readString();
+            const rootPayload = parsePayload(rootTag);
+            return rootPayload;
+        }
+
+        async function tryDecompressGzip(buffer) {
+            if (typeof DecompressionStream === 'function') {
+                try {
+                    const ds = new DecompressionStream('gzip');
+                    const decompressedStream = new Response(buffer).body.pipeThrough(ds);
+                    const ab = await new Response(decompressedStream).arrayBuffer();
+                    return ab;
+                } catch (e) {
+                    // not gzip or decompression failed
+                    throw e;
+                }
+            }
+            throw new Error('DecompressionStream not available');
+        }
+
+        async function loadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            const errorDiv = document.getElementById('error');
+            const successDiv = document.getElementById('success');
+            errorDiv.textContent = '';
+            successDiv.textContent = '';
+            if (!file) {
+                errorDiv.textContent = 'Please select a file first';
+                return;
+            }
+            const reader = new FileReader();
+            if (file.name.endsWith('.json')) {
+                reader.onload = function(e) {
+                    document.getElementById('nbtInput').value = e.target.result;
+                };
+                reader.readAsText(file);
+            } else if (file.name.endsWith('.nbt')) {
+                reader.onload = async function(e) {
+                    const buffer = e.target.result;
+
+                    // Try existing libraries first
+                    // nbtfy (if present) or nbt.parse (nbt.js). If unavailable, use embedded parser.
+
+                    // Helper to convert parsed root to plain structure expected by the rest of the app
+                    function normalizeAndSet(rootObj) {
+                        try {
+                            if (!rootObj) {
+                                errorDiv.textContent = 'Parsed NBT is empty';
+                                return;
+                            }
+                            // rootObj is expected to have size, palette, blocks
+                            const size = rootObj.size || rootObj.Size || rootObj.size || null;
+                            const palette = rootObj.palette || rootObj.Palette || rootObj.palette || null;
+                            const blocks = rootObj.blocks || rootObj.Blocks || rootObj.blocks || null;
+
+                            const nbtData = { size: [], palette: [], blocks: [] };
+                            if (Array.isArray(size)) nbtData.size = size.map(v => (typeof v === 'object' && 'value' in v) ? v.value : v);
+                            else if (size && size.value) nbtData.size = size.value;
+
+                            if (Array.isArray(palette)) {
+                                nbtData.palette = palette.map(p => {
+                                    if (typeof p === 'string') return { Name: p };
+                                    if (p.Name) return { Name: p.Name };
+                                    if (p.name) return { Name: p.name };
+                                    if (p.Name && p.Name.value) return { Name: p.Name.value };
+                                    if (p.name && p.name.value) return { Name: p.name.value };
+                                    return { Name: JSON.stringify(p) };
+                                });
+                            }
+
+                            if (Array.isArray(blocks)) {
+                                nbtData.blocks = blocks.map(b => {
+                                    const pos = b.pos || b.Pos || b.Position || b.Pos;
+                                    const state = b.state || b.State || b.state;
+                                    const resolvedPos = Array.isArray(pos) ? pos.map(v => (typeof v === 'object' && 'value' in v) ? v.value : v) : pos;
+                                    const resolvedState = (typeof state === 'object' && 'value' in state) ? state.value : state;
+                                    return { pos: resolvedPos, state: resolvedState };
+                                });
+                            }
+
+                            if (!nbtData.size.length || !nbtData.palette.length || !nbtData.blocks.length) {
+                                // Try to detect nested structure (e.g., root contains 'data' compound)
+                                if (rootObj.data) return normalizeAndSet(rootObj.data);
+                                // or rootObj.value
+                                if (rootObj.value) return normalizeAndSet(rootObj.value);
+                            }
+
+                            // If still missing, just try to set the raw object as JSON
+                            document.getElementById('nbtInput').value = JSON.stringify(nbtData.size && nbtData.size.length ? nbtData : rootObj, null, 2);
+                            successDiv.textContent = 'NBT file loaded successfully!';
+                            // Auto-convert and render after loading to avoid stale UI expectation
+                            try {
+                                convertAndRender();
+                            } catch (e) {
+                                console.warn('Auto convert failed', e);
+                            }
+                        } catch (err) {
+                            errorDiv.textContent = 'Error normalizing NBT: ' + err.message;
+                        }
+                    }
+
+                    // Try nbtfy if present
+                    if (window.nbtfy) {
+                        try {
+                            let parsed = null;
+                            if (typeof window.nbtfy.parse === 'function') parsed = window.nbtfy.parse(buffer);
+                            else if (typeof window.nbtfy.fromBuffer === 'function') parsed = window.nbtfy.fromBuffer(new Uint8Array(buffer));
+                            if (parsed) {
+                                normalizeAndSet(parsed);
+                                return;
+                            }
+                        } catch (err) {
+                            console.warn('nbtfy failed, falling back', err);
+                        }
+                    }
+
+                    // Try nbt.js parse
+                    if (window.nbt && typeof window.nbt.parse === 'function') {
+                        try {
+                            window.nbt.parse(buffer, function(error, data) {
+                                if (error) {
+                                    errorDiv.textContent = 'Error parsing NBT file: ' + error.message;
+                                    return;
+                                }
+                                // data may have .value or be raw
+                                const root = data.value ? Object.fromEntries(Object.entries(data.value).reduce((acc, [k, v]) => { acc[k] = v.value !== undefined ? v.value : v; return acc; }, {})) : data;
+                                normalizeAndSet(root);
+                            });
+                            return;
+                        } catch (err) {
+                            console.warn('nbt.parse failed, falling back', err);
+                        }
+                    }
+
+                    // Final fallback: try decompressing (if gzipped) then parse with embedded parser
+                    let ab = buffer;
+                    try {
+                        ab = await tryDecompressGzip(buffer);
+                    } catch (e) {
+                        // not gzipped or decompression failed - use original buffer
+                    }
+
+                    try {
+                        const parsedRoot = parseNBTBuffer(ab);
+                        normalizeAndSet(parsedRoot);
+                        return;
+                    } catch (err) {
+                        errorDiv.textContent = 'Embedded NBT parser failed: ' + err.message;
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            } else {
+                errorDiv.textContent = 'Please select a .nbt or .json file';
+            }
+        }
+
+        function convertAndRender() {
+            const nbtInput = document.getElementById('nbtInput').value.trim();
+            const errorDiv = document.getElementById('error');
+            const successDiv = document.getElementById('success');
+            errorDiv.textContent = '';
+            successDiv.textContent = '';
+            try {
+                const nbtData = JSON.parse(nbtInput);
+                const patchouli = nbtToPatchouli(nbtData);
+                currentPatchouli = patchouli;
+                document.getElementById('patchouliOutput').textContent = JSON.stringify(patchouli, null, 2);
+                document.getElementById('copyBtn').style.display = 'inline-block';
+                renderStructure(patchouli);
+                successDiv.textContent = 'Conversion successful!';
+            } catch (error) {
+                errorDiv.textContent = 'Error: ' + error.message;
+            }
         }
 
         function init3D() {
@@ -129,6 +399,182 @@
             camera.position.set(5, 5, 5);
             camera.lookAt(0, 0, 0);
             renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('canvas') });
+            renderer.setSize(800, 600);
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(10, 10, 5);
+            scene.add(directionalLight);
+            addMouseControls();
+            animate();
+        }
+
+        function disposeMesh(mesh) {
+            try {
+                if (mesh.geometry) mesh.geometry.dispose();
+                if (mesh.material) {
+                    if (Array.isArray(mesh.material)) {
+                        mesh.material.forEach(m => { if (m.map) m.map.dispose(); if (m.dispose) m.dispose(); });
+                    } else {
+                        if (mesh.material.map) mesh.material.map.dispose();
+                        if (mesh.material.dispose) mesh.material.dispose();
+                    }
+                }
+            } catch (e) {
+                console.warn('Dispose failed', e);
+            }
+        }
+
+        function renderStructure(patchouli) {
+            // allow calling without arg (use currentPatchouli)
+            patchouli = patchouli || currentPatchouli;
+            if (!patchouli) return;
+
+            // remove previous meshes and dispose resources
+            blockMeshes.forEach(mesh => {
+                try { scene.remove(mesh); } catch (e) { /* ignore */ }
+                disposeMesh(mesh);
+            });
+            blockMeshes = [];
+
+            const pattern = patchouli.pattern || [];
+            const mapping = patchouli.mapping || {};
+
+            for (let y = 0; y < pattern.length; y++) {
+                const layer = pattern[y] || [];
+                for (let z = 0; z < layer.length; z++) {
+                    const row = layer[z] || '';
+                    for (let x = 0; x < row.length; x++) {
+                        const char = row[x];
+                        if (char === ' ' || char === '0' || !char) continue;
+                        const blockType = mapping[char];
+                        if (!blockType) continue;
+
+                        // ensure blockType is a string
+                        const t = typeof blockType === 'string' ? blockType.toLowerCase() : '';
+
+                        // Skip air / empty blocks (do not render)
+                        if (t.includes('air')) continue;
+
+                        // detect material characteristics
+                        const isGlass = t.includes('glass');
+                        const isLeaves = t.includes('leaves');
+                        const transparent = isGlass || isLeaves;
+                        const opacity = isGlass ? 0.6 : (isLeaves ? 0.85 : 1);
+
+                        // get color; getBlockColor returns null for unknown blocks
+                        const color = getBlockColor(blockType);
+
+                        // If color is null (unknown block) render as blueprint (blue ghost)
+                        const useBlueprint = color === null;
+                        const materialColor = useBlueprint ? 0x4aa3ff : color;
+                        const materialTransparent = useBlueprint ? true : transparent;
+                        const materialOpacity = useBlueprint ? 0.35 : opacity;
+
+                        const geometry = new THREE.BoxGeometry(0.9, 0.9, 0.9);
+                        const material = new THREE.MeshLambertMaterial({
+                            color: materialColor,
+                            transparent: materialTransparent,
+                            opacity: materialOpacity,
+                            depthWrite: !materialTransparent
+                        });
+                        const mesh = new THREE.Mesh(geometry, material);
+                        // center structure in view by translating based on pattern size
+                        const width = row.length;
+                        const depth = layer.length;
+                        const height = pattern.length;
+                        const cx = (width - 1) / 2;
+                        const cy = (height - 1) / 2;
+                        const cz = (depth - 1) / 2;
+                        mesh.position.set(x - cx, y - cy, z - cz);
+                        mesh.userData = { blockType, layer: y, position: [x, y, z] };
+                        scene.add(mesh);
+                        blockMeshes.push(mesh);
+                    }
+                }
+            }
+            updateLayerSelector(pattern.length);
+            // immediately render one frame to avoid waiting for next RAF tick
+            try { renderer.render(scene, camera); } catch (e) { console.warn('Immediate render failed', e); }
+        }
+
+        function updateLayerSelector(layerCount) {
+            const select = document.getElementById('layerSelect');
+            select.innerHTML = '<option value="all">All Layers</option>';
+            for (let i = 0; i < layerCount; i++) {
+                const option = document.createElement('option');
+                option.value = i;
+                option.textContent = `Layer ${i+1                       }`;
+                select.appendChild(option);
+            }
+        }
+
+        function updateView() {
+            const selectedLayer = document.getElementById('layerSelect').value;
+            blockMeshes.forEach(mesh => {
+                if (selectedLayer === 'all') {
+                    mesh.visible = true;
+                } else {
+                    mesh.visible = mesh.userData.layer === parseInt(selectedLayer);
+                }
+            });
+            // force a render so visibility changes show immediately
+            try { renderer.render(scene, camera); } catch (e) { /* ignore */ }
+        }
+
+        function showAllLayers() {
+            document.getElementById('layerSelect').value = 'all';
+            updateView();
+        }
+
+        function resetCamera() {
+            camera.position.set(5, 5, 5);
+            camera.lookAt(0, 0, 0);
+            try { renderer.render(scene, camera); } catch (e) { /* ignore */ }
+        }
+
+        function loadExample() {
+            const example = {
+                "size": [2, 2, 2],
+                "palette": [
+                    {"Name": "minecraft:stone"},
+                    {"Name": "minecraft:oak_planks"},
+                    {"Name": "minecraft:glass"},
+                    {"Name": "minecraft:iron_block"}
+                ],
+                "blocks": [
+                    {"pos": [0, 0, 0], "state": 0},
+                    {"pos": [1, 0, 0], "state": 1},
+                    {"pos": [0, 0, 1], "state": 2},
+                    {"pos": [1, 0, 1], "state": 3},
+                    {"pos": [0, 1, 0], "state": 0},
+                    {"pos": [1, 1, 0], "state": 0},
+                    {"pos": [0, 1, 1], "state": 0},
+                    {"pos": [1, 1, 1], "state": 0}
+                ]
+            };
+            document.getElementById('nbtInput').value = JSON.stringify(example, null, 2);
+            // auto-convert example so user sees immediate preview
+            convertAndRender();
+        }
+
+        async function copyToClipboard() {
+            const output = document.getElementById('patchouliOutput').textContent;
+            try {
+                await navigator.clipboard.writeText(output);
+                document.getElementById('success').textContent = 'Copied to clipboard!';
+            } catch (err) {
+                document.getElementById('error').textContent = 'Failed to copy to clipboard';
+            }
+        }
+
+        function init3D() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x333333);
+            camera = new THREE.PerspectiveCamera(75, 800/600, 0.1, 1000);
+            camera.position.set(5, 5, 5);
+            camera.lookAt(0, 0, 0);
+            renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('canvas'), antialias: true });
             renderer.setSize(800, 600);
             const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
             scene.add(ambientLight);
@@ -175,6 +621,7 @@
         }
 
         function getBlockColor(blockType) {
+            // Exact mappings (preferred)
             const colors = {
                 'minecraft:stone': 0x7a7a7a,
                 'minecraft:oak_planks': 0xb5935b,
@@ -184,181 +631,30 @@
                 'minecraft:dirt': 0x8b6914,
                 'minecraft:grass_block': 0x7bb146
             };
-            return colors[blockType] || 0xff0000;
-        }
 
-        function renderStructure(patchouli) {
-            blockMeshes.forEach(mesh => scene.remove(mesh));
-            blockMeshes = [];
-            const pattern = patchouli.pattern;
-            const mapping = patchouli.mapping;
-            for (let y = 0; y < pattern.length; y++) {
-                const layer = pattern[y];
-                for (let z = 0; z < layer.length; z++) {
-                    const row = layer[z];
-                    for (let x = 0; x < row.length; x++) {
-                        const char = row[x];
-                        if (char === ' ' || char === '0') continue;
-                        const blockType = mapping[char];
-                        if (!blockType) continue;
-                        const geometry = new THREE.BoxGeometry(0.9, 0.9, 0.9);
-                        const material = new THREE.MeshLambertMaterial({
-                            color: getBlockColor(blockType),
-                            transparent: blockType.includes('glass'),
-                            opacity: blockType.includes('glass') ? 0.7 : 1
-                        });
-                        const mesh = new THREE.Mesh(geometry, material);
-                        mesh.position.set(x - 1, -(y - 1), z - 1);
-                        mesh.userData = { blockType, layer: y, position: [x, y, z] };
-                        scene.add(mesh);
-                        blockMeshes.push(mesh);
-                    }
-                }
-            }
-            updateLayerSelector(pattern.length);
-        }
+            if (!blockType || typeof blockType !== 'string') return 0xff00ff; // fallback magenta for issues
 
-        function updateLayerSelector(layerCount) {
-            const select = document.getElementById('layerSelect');
-            select.innerHTML = '<option value="all">All Layers</option>';
-            for (let i = 0; i < layerCount; i++) {
-                const option = document.createElement('option');
-                option.value = i;
-                option.textContent = `Layer ${i}`;
-                select.appendChild(option);
-            }
-        }
+            if (colors[blockType]) return colors[blockType];
 
-        function updateView() {
-            const selectedLayer = document.getElementById('layerSelect').value;
-            blockMeshes.forEach(mesh => {
-                if (selectedLayer === 'all') {
-                    mesh.visible = true;
-                } else {
-                    mesh.visible = mesh.userData.layer === parseInt(selectedLayer);
-                }
-            });
-        }
+            const t = blockType.toLowerCase();
 
-        function showAllLayers() {
-            document.getElementById('layerSelect').value = 'all';
-            updateView();
-        }
+            // LOGS
+            if (t.includes('oak_log') || t.includes(':log')) return 0x8b5a2b;        // oak/log brown
 
-        function resetCamera() {
-            camera.position.set(5, 5, 5);
-            camera.lookAt(0, 0, 0);
-        }
+            // LEAVES
+            if (t.includes('leaves')) return 0x6ca64a;                              // leaves green
 
-        function convertAndRender() {
-            const nbtInput = document.getElementById('nbtInput').value.trim();
-            const errorDiv = document.getElementById('error');
-            const successDiv = document.getElementById('success');
-            errorDiv.textContent = '';
-            successDiv.textContent = '';
-            try {
-                const nbtData = JSON.parse(nbtInput);
-                const patchouli = nbtToPatchouli(nbtData);
-                currentPatchouli = patchouli;
-                document.getElementById('patchouliOutput').textContent = JSON.stringify(patchouli, null, 2);
-                document.getElementById('copyBtn').style.display = 'inline-block';
-                renderStructure(patchouli);
-                successDiv.textContent = 'Conversion successful!';
-            } catch (error) {
-                errorDiv.textContent = 'Error: ' + error.message;
-            }
-        }
+            // PLANKS / WOOD
+            if (t.includes('planks') || t.includes('wood')) return 0xb5935b;        // plank brown
 
-        function loadExample() {
-            const example = {
-                "size": [2, 2, 2],
-                "palette": [
-                    {"Name": "minecraft:stone"},
-                    {"Name": "minecraft:oak_planks"},
-                    {"Name": "minecraft:glass"},
-                    {"Name": "minecraft:iron_block"}
-                ],
-                "blocks": [
-                    {"pos": [0, 0, 0], "state": 0},
-                    {"pos": [1, 0, 0], "state": 1},
-                    {"pos": [0, 0, 1], "state": 2},
-                    {"pos": [1, 0, 1], "state": 3},
-                    {"pos": [0, 1, 0], "state": 0},
-                    {"pos": [1, 1, 0], "state": 0},
-                    {"pos": [0, 1, 1], "state": 0},
-                    {"pos": [1, 1, 1], "state": 0}
-                ]
-            };
-            document.getElementById('nbtInput').value = JSON.stringify(example, null, 2);
-        }
+            // GLASS / TRANSPARENT
+            if (t.includes('glass')) return 0xe6f3ff;                              // glass tint
 
-        async function loadFile() {
-            const fileInput = document.getElementById('fileInput');
-            const file = fileInput.files[0];
-            const errorDiv = document.getElementById('error');
-            const successDiv = document.getElementById('success');
-            errorDiv.textContent = '';
-            successDiv.textContent = '';
-            if (!file) {
-                errorDiv.textContent = 'Please select a file first';
-                return;
-            }
-            const reader = new FileReader();
-            if (file.name.endsWith('.json')) {
-                reader.onload = function(e) {
-                    document.getElementById('nbtInput').value = e.target.result;
-                };
-                reader.readAsText(file);
-            } else if (file.name.endsWith('.nbt')) {
-                reader.onload = function(e) {
-                    // Check NBT.js loaded
-                    if (!window.nbt || !window.nbt.parse) {
-                        errorDiv.textContent = 'NBT.js library not loaded. Please check your internet connection or try again.';
-                        return;
-                    }
-                    try {
-                        window.nbt.parse(e.target.result, function(error, data) {
-                            if (error) {
-                                errorDiv.textContent = 'Error parsing NBT file: ' + error.message;
-                                return;
-                            }
-                            let nbtData = null;
-                            // Support Minecraft 1.13+ structure block format
-                            if (data.value.size && data.value.palette && data.value.blocks) {
-                                nbtData = {
-                                    size: data.value.size.value.value,
-                                    palette: data.value.palette.value.value.map(p => ({
-                                        Name: p.Name.value
-                                    })),
-                                    blocks: data.value.blocks.value.value.map(b => ({
-                                        pos: b.pos.value.value,
-                                        state: b.state.value
-                                    }))
-                                };
-                                document.getElementById('nbtInput').value = JSON.stringify(nbtData, null, 2);
-                                successDiv.textContent = 'NBT file loaded successfully!';
-                            } else {
-                                errorDiv.textContent = 'Unsupported NBT structure. Only Minecraft 1.13+ structure block files are supported.';
-                            }
-                        });
-                    } catch (error) {
-                        errorDiv.textContent = 'Error parsing NBT file: ' + error.message;
-                    }
-                };
-                reader.readAsArrayBuffer(file);
-            } else {
-                errorDiv.textContent = 'Please select a .nbt or .json file';
-            }
-        }
+            // AIR -> return null so renderer skips it
+            if (t.includes('air')) return null;
 
-        async function copyToClipboard() {
-            const output = document.getElementById('patchouliOutput').textContent;
-            try {
-                await navigator.clipboard.writeText(output);
-                document.getElementById('success').textContent = 'Copied to clipboard!';
-            } catch (err) {
-                document.getElementById('error').textContent = 'Failed to copy to clipboard';
-            }
+            // Unknown block -> return null so renderer renders as blueprint
+            return null;
         }
 
         window.onload = function() {
